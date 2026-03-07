@@ -464,7 +464,8 @@ class SqlParser:
         elif obj_type == ObjectType.PROCEDURE:
             return self._parse_procedure(sql, normalized)
         elif obj_type == ObjectType.FUNCTION:
-            return self._parse_function(sql, normalized)
+            # Functions are intentionally excluded from comparison
+            return None
         elif obj_type == ObjectType.TRIGGER:
             return self._parse_trigger(sql, normalized)
         elif obj_type == ObjectType.INDEX:
