@@ -1239,15 +1239,46 @@ class SqlGenerator:
         
         return lines
     
+    def _generate_diff_summary(self, prod_sql: str, dev_sql: str) -> List[str]:
+        """Generate a summary of differences between two SQL objects."""
+        lines = []
+        
+        # Simple line-by-line diff for summary
+        prod_lines = [l.strip() for l in prod_sql.split('\n') if l.strip() and not l.strip().startswith('--')]
+        dev_lines = [l.strip() for l in dev_sql.split('\n') if l.strip() and not l.strip().startswith('--')]
+        
+        # Find lines that differ
+        prod_set = set(prod_lines)
+        dev_set = set(dev_lines)
+        
+        only_in_prod = prod_set - dev_set
+        only_in_dev = dev_set - prod_set
+        
+        if only_in_prod:
+            lines.append("-- Lines in PROD but not DEV:")
+            for line in sorted(only_in_prod)[:5]:  # Limit to first 5 differences
+                lines.append(f"--   + {line[:80]}")
+            if len(only_in_prod) > 5:
+                lines.append(f"--   ... and {len(only_in_prod) - 5} more differences")
+        
+        if only_in_dev:
+            lines.append("-- Lines in DEV but not PROD:")
+            for line in sorted(only_in_dev)[:5]:
+                lines.append(f"--   - {line[:80]}")
+            if len(only_in_dev) > 5:
+                lines.append(f"--   ... and {len(only_in_dev) - 5} more differences")
+        
+        return lines
+    
     def _generate_views(self, result: ComparisonResult) -> List[str]:
         """Generate SQL for view differences."""
         lines = []
         
-        # New views
+        # New views - include full CREATE statement
         new_views = [d for d in result.get_by_type(DifferenceType.ONLY_IN_PROD) 
                     if d.object_type == ObjectType.VIEW]
         
-        # Modified views
+        # Modified views - show differences only, not full SQL
         modified_views = [d for d in result.get_by_type(DifferenceType.MODIFIED) 
                          if d.object_type == ObjectType.VIEW]
         
@@ -1257,23 +1288,25 @@ class SqlGenerator:
             lines.append("-- VIEWS")
             lines.append("-- =========================================================")
             
-            for diff in new_views + modified_views:
+            # New views - full CREATE
+            for diff in new_views:
                 if diff.prod_object:
                     lines.append("")
-                    lines.append(f"-- View: {diff.schema}.{diff.name}")
-                    
-                    # Start with raw SQL, cleaned of headers
-                    sql = self._clean_sql_for_output(diff.prod_object.raw_sql)
-                    
-                    if diff.difference_type == DifferenceType.MODIFIED:
-                        # Use CREATE OR ALTER if available, otherwise DROP/CREATE
-                        if 'CREATE OR ALTER' not in sql.upper():
-                            lines.append(f"IF OBJECT_ID('{diff.schema}.{diff.name}', 'V') IS NOT NULL")
-                            lines.append(f"    DROP VIEW [{diff.schema}].[{diff.name}];")
-                            lines.append("GO")
-                            sql = re.sub(r'CREATE\s+VIEW', 'CREATE VIEW', sql, flags=re.IGNORECASE)
-                    
-                    lines.append(sql)
+                    lines.append(f"-- NEW VIEW: {diff.schema}.{diff.name}")
+                    lines.append(self._clean_sql_for_output(diff.prod_object.raw_sql))
+                    lines.append("")
+                    lines.append("GO")
+            
+            # Modified views - show differences only
+            for diff in modified_views:
+                if diff.prod_object and diff.dev_object:
+                    lines.append("")
+                    lines.append(f"-- MODIFIED VIEW: {diff.schema}.{diff.name}")
+                    lines.append("-- Differences detected (review and apply manually):")
+                    lines.extend(self._generate_diff_summary(
+                        diff.prod_object.raw_sql, 
+                        diff.dev_object.raw_sql
+                    ))
                     lines.append("")
                     lines.append("GO")
         
@@ -1295,65 +1328,34 @@ class SqlGenerator:
             lines.append("-- STORED PROCEDURES")
             lines.append("-- =========================================================")
             
-            for diff in new_procs + modified_procs:
+            # New procedures - full CREATE
+            for diff in new_procs:
                 if diff.prod_object:
                     lines.append("")
-                    lines.append(f"-- Procedure: {diff.schema}.{diff.name}")
-                    
-                    # Start with raw SQL, cleaned of headers
-                    sql = self._clean_sql_for_output(diff.prod_object.raw_sql)
-                    
-                    if diff.difference_type == DifferenceType.MODIFIED:
-                        if 'CREATE OR ALTER' not in sql.upper():
-                            lines.append(f"IF OBJECT_ID('{diff.schema}.{diff.name}', 'P') IS NOT NULL")
-                            lines.append(f"    DROP PROCEDURE [{diff.schema}].[{diff.name}];")
-                            lines.append("GO")
-                            sql = re.sub(r'CREATE\s+(?:OR\s+ALTER\s+)?(?:PROCEDURE|PROC)', 
-                                        'CREATE PROCEDURE', sql, flags=re.IGNORECASE)
-                    
-                    lines.append(sql)
+                    lines.append(f"-- NEW PROCEDURE: {diff.schema}.{diff.name}")
+                    lines.append(self._clean_sql_for_output(diff.prod_object.raw_sql))
+                    lines.append("")
+                    lines.append("GO")
+            
+            # Modified procedures - show differences only
+            for diff in modified_procs:
+                if diff.prod_object and diff.dev_object:
+                    lines.append("")
+                    lines.append(f"-- MODIFIED PROCEDURE: {diff.schema}.{diff.name}")
+                    lines.append("-- Differences detected (review and apply manually):")
+                    lines.extend(self._generate_diff_summary(
+                        diff.prod_object.raw_sql, 
+                        diff.dev_object.raw_sql
+                    ))
                     lines.append("")
                     lines.append("GO")
         
         return lines
     
     def _generate_functions(self, result: ComparisonResult) -> List[str]:
-        """Generate SQL for function differences."""
-        lines = []
-        
-        new_funcs = [d for d in result.get_by_type(DifferenceType.ONLY_IN_PROD) 
-                    if d.object_type == ObjectType.FUNCTION]
-        
-        modified_funcs = [d for d in result.get_by_type(DifferenceType.MODIFIED) 
-                         if d.object_type == ObjectType.FUNCTION]
-        
-        if new_funcs or modified_funcs:
-            lines.append("")
-            lines.append("-- =========================================================")
-            lines.append("-- FUNCTIONS")
-            lines.append("-- =========================================================")
-            
-            for diff in new_funcs + modified_funcs:
-                if diff.prod_object:
-                    lines.append("")
-                    lines.append(f"-- Function: {diff.schema}.{diff.name}")
-                    
-                    # Start with raw SQL, cleaned of headers
-                    sql = self._clean_sql_for_output(diff.prod_object.raw_sql)
-                    
-                    if diff.difference_type == DifferenceType.MODIFIED:
-                        if 'CREATE OR ALTER' not in sql.upper():
-                            lines.append(f"IF OBJECT_ID('{diff.schema}.{diff.name}', 'FN') IS NOT NULL")
-                            lines.append(f"    DROP FUNCTION [{diff.schema}].[{diff.name}];")
-                            lines.append("GO")
-                            sql = re.sub(r'CREATE\s+(?:OR\s+ALTER\s+)?FUNCTION', 
-                                        'CREATE FUNCTION', sql, flags=re.IGNORECASE)
-                    
-                    lines.append(sql)
-                    lines.append("")
-                    lines.append("GO")
-        
-        return lines
+        """Generate SQL for function differences - FUNCTIONS ARE EXCLUDED."""
+        # Functions are intentionally excluded from comparison and output
+        return []
     
     def _generate_triggers(self, result: ComparisonResult) -> List[str]:
         """Generate SQL for trigger differences."""
@@ -1371,23 +1373,25 @@ class SqlGenerator:
             lines.append("-- TRIGGERS")
             lines.append("-- =========================================================")
             
-            for diff in new_triggers + modified_triggers:
+            # New triggers - full CREATE
+            for diff in new_triggers:
                 if diff.prod_object:
                     lines.append("")
-                    lines.append(f"-- Trigger: {diff.schema}.{diff.name}")
-                    
-                    # Start with raw SQL, cleaned of headers
-                    sql = self._clean_sql_for_output(diff.prod_object.raw_sql)
-                    
-                    if diff.difference_type == DifferenceType.MODIFIED:
-                        if 'CREATE OR ALTER' not in sql.upper():
-                            lines.append(f"IF OBJECT_ID('{diff.schema}.{diff.name}', 'TR') IS NOT NULL")
-                            lines.append(f"    DROP TRIGGER [{diff.schema}].[{diff.name}];")
-                            lines.append("GO")
-                            sql = re.sub(r'CREATE\s+(?:OR\s+ALTER\s+)?TRIGGER', 
-                                        'CREATE TRIGGER', sql, flags=re.IGNORECASE)
-                    
-                    lines.append(sql)
+                    lines.append(f"-- NEW TRIGGER: {diff.schema}.{diff.name}")
+                    lines.append(self._clean_sql_for_output(diff.prod_object.raw_sql))
+                    lines.append("")
+                    lines.append("GO")
+            
+            # Modified triggers - show differences only
+            for diff in modified_triggers:
+                if diff.prod_object and diff.dev_object:
+                    lines.append("")
+                    lines.append(f"-- MODIFIED TRIGGER: {diff.schema}.{diff.name}")
+                    lines.append("-- Differences detected (review and apply manually):")
+                    lines.extend(self._generate_diff_summary(
+                        diff.prod_object.raw_sql, 
+                        diff.dev_object.raw_sql
+                    ))
                     lines.append("")
                     lines.append("GO")
         
@@ -1443,6 +1447,10 @@ class JsonReportGenerator:
     
     def generate(self, result: ComparisonResult, prod_file: str, dev_file: str) -> str:
         """Generate JSON report content."""
+        # Filter out functions from all lists
+        def filter_functions(diffs):
+            return [d for d in diffs if d.object_type != ObjectType.FUNCTION]
+        
         report = {
             "metadata": {
                 "generated_at": datetime.now().isoformat(),
@@ -1454,25 +1462,25 @@ class JsonReportGenerator:
             "summary": result.summary_counts(),
             "objects_only_in_prod": [
                 d.to_dict() for d in sorted(
-                    result.get_by_type(DifferenceType.ONLY_IN_PROD),
+                    filter_functions(result.get_by_type(DifferenceType.ONLY_IN_PROD)),
                     key=lambda x: (x.object_type.value, x.schema, x.name)
                 )
             ],
             "objects_only_in_dev": [
                 d.to_dict() for d in sorted(
-                    result.get_by_type(DifferenceType.ONLY_IN_DEV),
+                    filter_functions(result.get_by_type(DifferenceType.ONLY_IN_DEV)),
                     key=lambda x: (x.object_type.value, x.schema, x.name)
                 )
             ],
             "modified_objects": [
                 d.to_dict() for d in sorted(
-                    result.get_by_type(DifferenceType.MODIFIED),
+                    filter_functions(result.get_by_type(DifferenceType.MODIFIED)),
                     key=lambda x: (x.object_type.value, x.schema, x.name)
                 )
             ],
             "manual_review_items": [
                 d.to_dict() for d in sorted(
-                    result.get_manual_review_items(),
+                    filter_functions(result.get_manual_review_items()),
                     key=lambda x: (x.object_type.value, x.schema, x.name)
                 )
             ]
@@ -1582,35 +1590,60 @@ class MarkdownReportGenerator:
                         lines.append(f"- `{constraint['name']}` ({constraint['type']})")
                     lines.append("")
         
-        # Modified views
+        # Modified views - show differences
         modified_views = [d for d in result.get_by_type(DifferenceType.MODIFIED) 
                          if d.object_type == ObjectType.VIEW]
         if modified_views:
             lines.append("## Modified Views")
             lines.append("")
             for diff in modified_views:
-                lines.append(f"- `{diff.schema}.{diff.name}`")
+                lines.append(f"### `{diff.schema}.{diff.name}`")
+                lines.append("")
+                if diff.prod_object and diff.dev_object:
+                    lines.append("**Differences:**")
+                    lines.append("")
+                    # Show a preview of differences
+                    prod_preview = diff.prod_object.body[:200] if diff.prod_object.body else "N/A"
+                    dev_preview = diff.dev_object.body[:200] if diff.dev_object.body else "N/A"
+                    lines.append("**PROD:**")
+                    lines.append(f"```sql")
+                    lines.append(prod_preview)
+                    lines.append("```")
+                    lines.append("")
+                    lines.append("**DEV:**")
+                    lines.append(f"```sql")
+                    lines.append(dev_preview)
+                    lines.append("```")
+                    lines.append("")
             lines.append("")
         
-        # Modified procedures
+        # Modified procedures - show differences
         modified_procs = [d for d in result.get_by_type(DifferenceType.MODIFIED) 
                          if d.object_type == ObjectType.PROCEDURE]
         if modified_procs:
             lines.append("## Modified Procedures")
             lines.append("")
             for diff in modified_procs:
-                lines.append(f"- `{diff.schema}.{diff.name}`")
+                lines.append(f"### `{diff.schema}.{diff.name}`")
+                lines.append("")
+                if diff.prod_object and diff.dev_object:
+                    lines.append("**Differences:**")
+                    lines.append("")
+                    prod_preview = diff.prod_object.body[:200] if diff.prod_object.body else "N/A"
+                    dev_preview = diff.dev_object.body[:200] if diff.dev_object.body else "N/A"
+                    lines.append("**PROD:**")
+                    lines.append(f"```sql")
+                    lines.append(prod_preview)
+                    lines.append("```")
+                    lines.append("")
+                    lines.append("**DEV:**")
+                    lines.append(f"```sql")
+                    lines.append(dev_preview)
+                    lines.append("```")
+                    lines.append("")
             lines.append("")
         
-        # Modified functions
-        modified_funcs = [d for d in result.get_by_type(DifferenceType.MODIFIED) 
-                         if d.object_type == ObjectType.FUNCTION]
-        if modified_funcs:
-            lines.append("## Modified Functions")
-            lines.append("")
-            for diff in modified_funcs:
-                lines.append(f"- `{diff.schema}.{diff.name}`")
-            lines.append("")
+        # Note: Functions are excluded from comparison
         
         return '\n'.join(lines)
 
