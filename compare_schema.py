@@ -436,6 +436,22 @@ class SqlParser:
     
     def _parse_object(self, sql: str) -> Optional[SqlObject]:
         """Parse a single SQL statement into a SqlObject."""
+        stripped = sql.strip()
+        
+        # Skip empty batches
+        if not stripped or stripped.upper() == 'GO':
+            return None
+        
+        # Skip if the batch is only comments (check by removing comments and seeing if anything remains)
+        # Simple check: if it starts with comment and has no CREATE/ALTER keywords
+        upper_stripped = stripped.upper()
+        has_create = 'CREATE' in upper_stripped
+        has_alter = 'ALTER' in upper_stripped
+        
+        if not has_create and not has_alter:
+            # Likely just comments, skip
+            return None
+        
         normalized = self.normalizer.normalize(sql)
         
         # Try to identify object type
@@ -558,6 +574,10 @@ class SqlParser:
             if not col_def:
                 continue
             
+            # Skip comment lines
+            if col_def.startswith('--') or col_def.startswith('/*'):
+                continue
+            
             # Skip constraint definitions (they start with CONSTRAINT, PRIMARY, UNIQUE, etc.)
             if re.match(r'^(CONSTRAINT|PRIMARY|UNIQUE|FOREIGN|CHECK|INDEX)', col_def, re.IGNORECASE):
                 continue
@@ -594,6 +614,12 @@ class SqlParser:
     
     def _parse_single_column(self, col_def: str) -> Optional[ColumnDefinition]:
         """Parse a single column definition."""
+        col_def = col_def.strip()
+        
+        # Skip if it looks like a comment
+        if col_def.startswith('--') or col_def.startswith('/*'):
+            return None
+        
         # Pattern: [name] type [(length)] [NULL|NOT NULL] [IDENTITY...] [DEFAULT...]
         pattern = r'^(?:\[?([^\]\s]+)\]?)\s+'  # column name
         pattern += r'(\w+)'  # data type
@@ -603,7 +629,7 @@ class SqlParser:
         pattern += r'(?:\s+(NULL|NOT\s+NULL))?'  # nullability
         pattern += r'(?:\s+DEFAULT\s+([^\s,]+))?'  # default value
         
-        match = re.match(pattern, col_def.strip(), re.IGNORECASE)
+        match = re.match(pattern, col_def, re.IGNORECASE)
         if not match:
             return None
         
@@ -912,6 +938,20 @@ class TableComparator:
         for name in set(dev_indexes.keys()) - set(prod_indexes.keys()):
             details["extra_indexes"].append({"name": name})
         
+        # Check if there are any actual differences
+        has_differences = (
+            details["missing_columns"] or
+            details["extra_columns"] or
+            details["modified_columns"] or
+            details["missing_constraints"] or
+            details["extra_constraints"] or
+            details["missing_indexes"] or
+            details["extra_indexes"]
+        )
+        
+        if not has_differences:
+            return None
+        
         return ObjectDifference(
             difference_type=DifferenceType.MODIFIED,
             object_type=ObjectType.TABLE,
@@ -1046,6 +1086,24 @@ class SqlGenerator:
         
         return '\n'.join(lines)
     
+    def _clean_sql_for_output(self, sql: str) -> str:
+        """Remove leading comment headers from SQL for clean output."""
+        lines = sql.split('\n')
+        result = []
+        in_header = True
+        
+        for line in lines:
+            # Skip comment lines and empty lines at the beginning
+            if in_header:
+                stripped = line.strip()
+                if stripped.startswith('--') or stripped.startswith('/*') or stripped.startswith('*') or not stripped:
+                    continue
+                else:
+                    in_header = False
+            result.append(line)
+        
+        return '\n'.join(result).strip()
+    
     def _generate_header(self, result: ComparisonResult, prod_file: str, dev_file: str) -> List[str]:
         """Generate the summary header."""
         lines = []
@@ -1103,7 +1161,7 @@ class SqlGenerator:
                 if diff.prod_object:
                     lines.append("")
                     lines.append(f"-- Create table {diff.schema}.{diff.name}")
-                    lines.append(diff.prod_object.raw_sql)
+                    lines.append(self._clean_sql_for_output(diff.prod_object.raw_sql))
                     lines.append("")
                     lines.append("GO")
         
@@ -1174,7 +1232,7 @@ class SqlGenerator:
             for diff in new_indexes:
                 if diff.prod_object:
                     lines.append("")
-                    lines.append(diff.prod_object.raw_sql)
+                    lines.append(self._clean_sql_for_output(diff.prod_object.raw_sql))
                     lines.append("")
                     lines.append("GO")
         
@@ -1203,9 +1261,11 @@ class SqlGenerator:
                     lines.append("")
                     lines.append(f"-- View: {diff.schema}.{diff.name}")
                     
+                    # Start with raw SQL, cleaned of headers
+                    sql = self._clean_sql_for_output(diff.prod_object.raw_sql)
+                    
                     if diff.difference_type == DifferenceType.MODIFIED:
                         # Use CREATE OR ALTER if available, otherwise DROP/CREATE
-                        sql = diff.prod_object.raw_sql
                         if 'CREATE OR ALTER' not in sql.upper():
                             lines.append(f"IF OBJECT_ID('{diff.schema}.{diff.name}', 'V') IS NOT NULL")
                             lines.append(f"    DROP VIEW [{diff.schema}].[{diff.name}];")
@@ -1239,7 +1299,8 @@ class SqlGenerator:
                     lines.append("")
                     lines.append(f"-- Procedure: {diff.schema}.{diff.name}")
                     
-                    sql = diff.prod_object.raw_sql
+                    # Start with raw SQL, cleaned of headers
+                    sql = self._clean_sql_for_output(diff.prod_object.raw_sql)
                     
                     if diff.difference_type == DifferenceType.MODIFIED:
                         if 'CREATE OR ALTER' not in sql.upper():
@@ -1276,7 +1337,8 @@ class SqlGenerator:
                     lines.append("")
                     lines.append(f"-- Function: {diff.schema}.{diff.name}")
                     
-                    sql = diff.prod_object.raw_sql
+                    # Start with raw SQL, cleaned of headers
+                    sql = self._clean_sql_for_output(diff.prod_object.raw_sql)
                     
                     if diff.difference_type == DifferenceType.MODIFIED:
                         if 'CREATE OR ALTER' not in sql.upper():
@@ -1313,7 +1375,8 @@ class SqlGenerator:
                     lines.append("")
                     lines.append(f"-- Trigger: {diff.schema}.{diff.name}")
                     
-                    sql = diff.prod_object.raw_sql
+                    # Start with raw SQL, cleaned of headers
+                    sql = self._clean_sql_for_output(diff.prod_object.raw_sql)
                     
                     if diff.difference_type == DifferenceType.MODIFIED:
                         if 'CREATE OR ALTER' not in sql.upper():
